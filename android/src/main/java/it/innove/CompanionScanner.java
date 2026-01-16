@@ -2,8 +2,6 @@ package it.innove;
 
 import static android.app.Activity.RESULT_OK;
 
-import static com.facebook.react.bridge.UiThreadUtil.runOnUiThread;
-
 import android.app.Activity;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.le.ScanFilter;

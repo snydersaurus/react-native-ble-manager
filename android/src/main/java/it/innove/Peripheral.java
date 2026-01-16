@@ -15,7 +15,6 @@ import android.bluetooth.BluetoothStatusCodes;
 import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
-import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
 
@@ -75,7 +74,7 @@ public class Peripheral extends BluetoothGattCallback {
     private LinkedList<Callback> requestMTUCallbacks = new LinkedList<>();
 
     private final Queue<Runnable> commandQueue = new ConcurrentLinkedQueue<>();
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Handler bleHandler = BleThread.getHandler();
     private Runnable discoverServicesRunnable;
     private boolean commandQueueBusy = false;
 
@@ -112,7 +111,7 @@ public class Peripheral extends BluetoothGattCallback {
     }
 
     public void connect(final Callback callback, Activity activity, ReadableMap options) {
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             if (!connected) {
                 BluetoothDevice device = getDevice();
                 this.connectCallbacks.addLast(callback);
@@ -156,7 +155,7 @@ public class Peripheral extends BluetoothGattCallback {
     // bt_btif : Register with GATT stack failed.
 
     public void disconnect(final Callback callback, final boolean force) {
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             for (Callback connectCallback : connectCallbacks) {
                 connectCallback.invoke("Disconnect called before connect callback invoked");
             }
@@ -293,7 +292,7 @@ public class Peripheral extends BluetoothGattCallback {
     @Override
     public void onServicesDiscovered(BluetoothGatt gatt, int status) {
         super.onServicesDiscovered(gatt, status);
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             for (Callback retrieveServicesCallback : retrieveServicesCallbacks) {
                 WritableMap map = this.asWritableMap(gatt);
                 retrieveServicesCallback.invoke(null, map);
@@ -309,7 +308,7 @@ public class Peripheral extends BluetoothGattCallback {
         Log.d(BleManager.LOG_TAG, "onConnectionStateChange to " + newState + " on peripheral: " + device.getAddress()
                 + " with status " + status);
 
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             gatt = gatta;
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
@@ -333,7 +332,7 @@ public class Peripheral extends BluetoothGattCallback {
                     }
                 };
 
-                mainHandler.post(discoverServicesRunnable);
+                bleHandler.post(discoverServicesRunnable);
 
                 sendConnectionEvent(device, "BleManagerConnectPeripheral", status);
 
@@ -346,7 +345,7 @@ public class Peripheral extends BluetoothGattCallback {
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
 
                 if (discoverServicesRunnable != null) {
-                    mainHandler.removeCallbacks(discoverServicesRunnable);
+                    bleHandler.removeCallbacks(discoverServicesRunnable);
                     discoverServicesRunnable = null;
                 }
 
@@ -437,42 +436,45 @@ public class Peripheral extends BluetoothGattCallback {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             super.onCharacteristicChanged(gatt, characteristic, data);
         }
-        try {
-            String charString = characteristic.getUuid().toString();
-            String service = characteristic.getService().getUuid().toString();
-            NotifyBufferContainer buffer = this.bufferedCharacteristics
-                    .get(this.bufferedCharacteristicsKey(service, charString));
-            byte[] dataValue = data;
-            // If for some reason the value's length >= 2*buffer size this will be able to
-            // handle it
-            while (dataValue != null) {
-                byte[] rest = null;
-                if (buffer != null) {
-                    rest = buffer.put(dataValue);
-                    if (buffer.isBufferFull()) {
+        final byte[] dataCopy = copyOf(data);
+        bleHandler.post(() -> {
+            try {
+                String charString = characteristic.getUuid().toString();
+                String service = characteristic.getService().getUuid().toString();
+                NotifyBufferContainer buffer = this.bufferedCharacteristics
+                        .get(this.bufferedCharacteristicsKey(service, charString));
+                byte[] dataValue = dataCopy;
+                // If for some reason the value's length >= 2*buffer size this will be able to
+                // handle it
+                while (dataValue != null) {
+                    byte[] rest = null;
+                    if (buffer != null) {
+                        rest = buffer.put(dataValue);
+                        if (buffer.isBufferFull()) {
 
-                        // fetch and reset
-                        dataValue = buffer.items.array();
-                        buffer.resetBuffer();
-                    } else {
-                        return;
+                            // fetch and reset
+                            dataValue = buffer.items.array();
+                            buffer.resetBuffer();
+                        } else {
+                            return;
+                        }
                     }
+
+                    WritableMap map = Arguments.createMap();
+                    map.putString("peripheral", device.getAddress());
+                    map.putString("characteristic", charString);
+                    map.putString("service", service);
+                    map.putArray("value", BleManager.bytesToWritableArray(dataValue));
+                    sendEvent("BleManagerDidUpdateValueForCharacteristic", map);
+
+                    // Check if rest exists. If so it needs to be added to the clean buffer
+                    dataValue = rest;
                 }
-                
-                WritableMap map = Arguments.createMap();
-                map.putString("peripheral", device.getAddress());
-                map.putString("characteristic", charString);
-                map.putString("service", service);
-                map.putArray("value", BleManager.bytesToWritableArray(dataValue));
-                sendEvent("BleManagerDidUpdateValueForCharacteristic", map);
 
-                // Check if rest exists. If so it needs to be added to the clean buffer
-                dataValue = rest;
+            } catch (Exception e) {
+                Log.d(BleManager.LOG_TAG, "onCharacteristicChanged ERROR: " + e);
             }
-
-        } catch (Exception e) {
-            Log.d(BleManager.LOG_TAG, "onCharacteristicChanged ERROR: " + e);
-        }
+        });
     }
 
     @Override
@@ -489,7 +491,7 @@ public class Peripheral extends BluetoothGattCallback {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             super.onCharacteristicRead(gatt, characteristic, data, status);
         }
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 if (status == GATT_AUTH_FAIL || status == GATT_INSUFFICIENT_AUTHENTICATION) {
                     Log.d(BleManager.LOG_TAG, "Read needs bonding");
@@ -518,7 +520,7 @@ public class Peripheral extends BluetoothGattCallback {
     public void onCharacteristicWrite(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
         super.onCharacteristicWrite(gatt, characteristic, status);
 
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             if (writeQueue.size() > 0) {
                 byte[] data = writeQueue.get(0);
                 writeQueue.remove(0);
@@ -545,7 +547,7 @@ public class Peripheral extends BluetoothGattCallback {
 
     @Override
     public void onDescriptorWrite(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             if (!registerNotifyCallbacks.isEmpty()) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     for (Callback registerNotifyCallback : registerNotifyCallbacks) {
@@ -586,7 +588,7 @@ public class Peripheral extends BluetoothGattCallback {
     public void onDescriptorRead(BluetoothGatt gatt, BluetoothGattDescriptor descriptor, int status) {
         super.onDescriptorRead(gatt, descriptor, status);
 
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 if (status == GATT_AUTH_FAIL || status == GATT_INSUFFICIENT_AUTHENTICATION) {
                     Log.d(BleManager.LOG_TAG, "Read needs bonding");
@@ -617,7 +619,7 @@ public class Peripheral extends BluetoothGattCallback {
     public void onReadRemoteRssi(BluetoothGatt gatt, int rssi, int status) {
         super.onReadRemoteRssi(gatt, rssi, status);
 
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             if (!readRSSICallbacks.isEmpty()) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     updateRssi(rssi);
@@ -949,7 +951,7 @@ public class Peripheral extends BluetoothGattCallback {
 
             // Execute the next command in the queue
             commandQueueBusy = true;
-            mainHandler.post(new Runnable() {
+            bleHandler.post(new Runnable() {
                 @Override
                 public void run() {
                     try {
@@ -1206,7 +1208,7 @@ public class Peripheral extends BluetoothGattCallback {
     @Override
     public void onMtuChanged(BluetoothGatt gatt, int mtu, int status) {
         super.onMtuChanged(gatt, mtu, status);
-        mainHandler.post(() -> {
+        bleHandler.post(() -> {
             if (!requestMTUCallbacks.isEmpty()) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     for (Callback requestMTUCallback : requestMTUCallbacks) {

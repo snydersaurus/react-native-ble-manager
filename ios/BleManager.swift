@@ -31,6 +31,7 @@ class BleManager: RCTEventEmitter, CBCentralManagerDelegate, CBPeripheralDelegat
     private var characteristicsLatches: Dictionary<String, Set<CBCharacteristic>>
     
     private let serialQueue = DispatchQueue(label: "BleManager.serialQueue")
+    private static var bleMethodQueue: DispatchQueue = DispatchQueue.main
     
     private var exactAdvertisingName: [String]
     
@@ -63,7 +64,11 @@ class BleManager: RCTEventEmitter, CBCentralManagerDelegate, CBPeripheralDelegat
         NotificationCenter.default.addObserver(self, selector: #selector(bridgeReloading), name: NSNotification.Name(rawValue: "RCTBridgeWillReloadNotification"), object: nil)
     }
     
-    @objc override static func requiresMainQueueSetup() -> Bool { return true }
+    @objc override static func requiresMainQueueSetup() -> Bool { return false }
+
+    @objc static func methodQueue() -> DispatchQueue! {
+        return BleManager.bleMethodQueue
+    }
     
     @objc override func supportedEvents() -> [String]! {
         return ["BleManagerDidUpdateValueForCharacteristic", "BleManagerStopScan", "BleManagerDiscoverPeripheral", "BleManagerConnectPeripheral", "BleManagerDisconnectPeripheral", "BleManagerDidUpdateState", "BleManagerCentralManagerWillRestoreState", "BleManagerDidUpdateNotificationStateFor"]
@@ -192,37 +197,38 @@ class BleManager: RCTEventEmitter, CBCentralManagerDelegate, CBPeripheralDelegat
             NSLog("BleManager initialized")
         }
         var initOptions = [String: Any]()
-        
+
         if let showAlert = options["showAlert"] as? Bool {
             initOptions[CBCentralManagerOptionShowPowerAlertKey] = showAlert
         }
-        
+
         if let verboseLogging = options["verboseLogging"] as? Bool {
             BleManager.verboseLogging = verboseLogging
         }
-        
-        var queue: DispatchQueue
+
         if let queueIdentifierKey = options["queueIdentifierKey"] as? String {
-            queue = DispatchQueue(label: queueIdentifierKey, qos: DispatchQoS.background)
+            BleManager.bleMethodQueue = DispatchQueue(label: queueIdentifierKey, qos: .background)
         } else {
-            queue = DispatchQueue.main
+            BleManager.bleMethodQueue = DispatchQueue.main
         }
-        
+
+        let centralQueue = BleManager.bleMethodQueue
+
         if let restoreIdentifierKey = options["restoreIdentifierKey"] as? String {
             initOptions[CBCentralManagerOptionRestoreIdentifierKey] = restoreIdentifierKey
-            
+
             if let sharedManager = BleManager.sharedManager {
                 manager = sharedManager
                 manager?.delegate = self
             } else {
-                manager = CBCentralManager(delegate: self, queue: queue, options: initOptions)
+                manager = CBCentralManager(delegate: self, queue: centralQueue, options: initOptions)
                 BleManager.sharedManager = manager
             }
         } else {
-            manager = CBCentralManager(delegate: self, queue: queue, options: initOptions)
+            manager = CBCentralManager(delegate: self, queue: centralQueue, options: initOptions)
             BleManager.sharedManager = manager
         }
-        
+
         callback([])
     }
     
@@ -532,7 +538,7 @@ class BleManager: RCTEventEmitter, CBCentralManagerDelegate, CBPeripheralDelegat
         }
     }
     
-    @objc func isScanning(_ callback: @escaping RCTResponseSenderBlock) {        
+    @objc func isScanning(_ callback: @escaping RCTResponseSenderBlock) {
         if let manager = manager {
             callback([NSNull(), manager.isScanning])
         } else {
